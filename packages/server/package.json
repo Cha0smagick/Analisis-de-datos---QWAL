@@ -1,0 +1,25 @@
+{
+  "name": "@qualicanvas/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QualiCanvas Server — API REST local (Express) que expone el núcleo CAQDAS para el dashboard web",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "dev": "npm run build && node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@qualicanvas/core": "*",
+    "express": "^4.21.2",
+    "multer": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.2"
+  }
+}
