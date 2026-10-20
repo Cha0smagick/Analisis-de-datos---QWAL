@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('qwal', {
     get: invoke('documents:get'),
     updateRawText: invoke('documents:updateRawText'),
     remove: invoke('documents:remove'),
+    createText: invoke('documents:createText'),
   },
   codes: {
     list: invoke('codes:list'),
@@ -60,12 +61,27 @@ contextBridge.exposeInMainWorld('qwal', {
   },
   relations: {
     listForEntity: invoke('relations:listForEntity'),
+    list: invoke('relations:list'),
+    create: invoke('relations:create'),
+    remove: invoke('relations:remove'),
   },
   attributes: {
     list: invoke('attributes:list'),
+    create: invoke('attributes:create'),
+    setValue: invoke('attributes:setValue'),
+    remove: invoke('attributes:remove'),
+    values: invoke('attributes:values'),
   },
   search: {
     query: invoke('search:query'),
+  },
+  media: {
+    transcribe: invoke('media:transcribe'),
+  },
+  // Prueba E2E: sólo responde cuando la app corre con E2E_SMOKE=1; en
+  // producción el canal no tiene handler y falla con "No handler registered".
+  __e2e: {
+    seed: invoke('__e2e:seed'),
   },
   analysis: {
     codeFrequencies: invoke('analysis:codeFrequencies'),

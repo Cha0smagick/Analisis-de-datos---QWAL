@@ -13,6 +13,7 @@
     "build": "npm run build -w @qualicanvas/core && npm run build:main && vite build",
     "build:main": "tsc -p tsconfig.node.json",
     "start": "electron .",
+    "e2e": "node e2e/smoke.mjs",
     "rebuild:native": "electron-rebuild -f -w ../core better-sqlite3",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json"
   },

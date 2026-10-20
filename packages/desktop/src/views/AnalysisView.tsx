@@ -4,6 +4,7 @@ import type {
   CooccurrenceMatrix,
   Code,
   CodeFrequencyReport,
+  CodingDensityRow,
   DocumentCodeMatrix,
   FleissKappaReport,
   FrameworkMatrixReport,
@@ -11,6 +12,7 @@ import type {
   JaccardMatrix,
   KwicReport,
   KrippendorffAlphaReport,
+  Relation,
   WordFrequencyReport,
 } from '../api';
 import { qwal } from '../api';
@@ -28,17 +30,19 @@ interface ReliabilityBundle {
  * `CooccurrenceMatrix`…). Antes esta vista recibía listas planas que `main.ts`/`app.ts`
  * fabricaban con normalizadores; esos ya no existen, así que aquí se consume la forma real.
  */
-type Tab = 'frecuencia' | 'coocurrencia' | 'palabras' | 'matriz' | 'kwic' | 'jaccard' | 'fiabilidad' | 'marco';
+type Tab = 'frecuencia' | 'coocurrencia' | 'red' | 'palabras' | 'matriz' | 'marco' | 'kwic' | 'jaccard' | 'fiabilidad' | 'equipo';
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: 'frecuencia', label: 'Frecuencia de códigos', icon: '🏷️' },
   { key: 'coocurrencia', label: 'Co-ocurrencias', icon: '🔗' },
+  { key: 'red', label: 'Red de códigos', icon: '🕸️' },
   { key: 'palabras', label: 'Palabras frecuentes', icon: '🔡' },
   { key: 'matriz', label: 'Matriz doc × código', icon: '📋' },
   { key: 'marco', label: 'Matriz de marco', icon: '🗂️' },
   { key: 'kwic', label: 'KWIC', icon: '🔠' },
   { key: 'jaccard', label: 'Similitud (Jaccard)', icon: '📐' },
   { key: 'fiabilidad', label: 'Fiabilidad', icon: '🤝' },
+  { key: 'equipo', label: 'Equipo', icon: '👥' },
 ];
 
 const MAX_MATRIX_COLUMNS = 24;
@@ -55,22 +59,26 @@ export default function AnalysisView() {
   const [loading, setLoading] = useState<Record<Tab, boolean>>({
     frecuencia: false,
     coocurrencia: false,
+    red: false,
     palabras: false,
     matriz: false,
     kwic: false,
     jaccard: false,
     fiabilidad: false,
     marco: false,
+    equipo: false,
   });
   const [error, setError] = useState<Record<Tab, string | null>>({
     frecuencia: null,
     coocurrencia: null,
+    red: null,
     palabras: null,
     matriz: null,
     kwic: null,
     jaccard: null,
     fiabilidad: null,
     marco: null,
+    equipo: null,
   });
   // KWIC depende de una consulta del usuario: el término vive aquí para que el
   // botón pueda relanzar la búsqueda (force) con el término actual.
@@ -92,6 +100,14 @@ export default function AnalysisView() {
           case 'coocurrencia':
             data = await qwal.analysis.cooccurrence();
             break;
+          case 'red': {
+            const [cooc, relations] = await Promise.all([
+              qwal.analysis.cooccurrence(),
+              qwal.relations.list(),
+            ]);
+            data = { cooc, relations };
+            break;
+          }
           case 'palabras':
             data = await qwal.analysis.wordFrequencies();
             break;
@@ -115,6 +131,9 @@ export default function AnalysisView() {
           }
           case 'marco':
             data = await qwal.analysis.frameworkMatrix();
+            break;
+          case 'equipo':
+            data = await qwal.coding.density();
             break;
         }
         setCache((c) => ({ ...c, [key]: data }));
@@ -260,6 +279,16 @@ function TabContent({
       return <FreqBars report={data as CodeFrequencyReport | undefined} />;
     case 'coocurrencia':
       return <CooccurrenceTable report={data as CooccurrenceMatrix | undefined} codeNames={codeNames} />;
+    case 'red': {
+      const bundle = data as { cooc: CooccurrenceMatrix; relations: Relation[] } | undefined;
+      return (
+        <CodeNetwork
+          cooc={bundle?.cooc}
+          relations={bundle?.relations ?? []}
+          codeNames={codeNames}
+        />
+      );
+    }
     case 'palabras':
       return <WordBars report={data as WordFrequencyReport | undefined} />;
     case 'matriz':
@@ -270,9 +299,181 @@ function TabContent({
       return <JaccardBars report={data as JaccardMatrix | undefined} />;
     case 'fiabilidad':
       return <ReliabilityPanel bundle={data as ReliabilityBundle | undefined} />;
+    case 'equipo':
+      return <DensityBars rows={data as CodingDensityRow[] | undefined} />;
     case 'marco':
       return <FrameworkRows report={data as FrameworkMatrixReport | undefined} />;
   }
+}
+
+/**
+ * Red de códigos: co-ocurrencias (gris, grosor ∝ frecuencia) y relaciones
+ * tipadas (naranja discontinuo, con etiqueta). Layout force-dir simplificado
+ * calculado una vez, determinista y sin dependencias; clic en un nodo lo aísla.
+ */
+function CodeNetwork({
+  cooc,
+  relations,
+  codeNames,
+}: {
+  cooc: CooccurrenceMatrix | undefined;
+  relations: Relation[];
+  codeNames: CodeNames;
+}) {
+  const [focus, setFocus] = useState<string | null>(null);
+  if (cooc === undefined) return null;
+
+  const name = (id: string) => codeNames.get(id) ?? id;
+  const short = (s: string) => (s.length > 16 ? `${s.slice(0, 15)}…` : s);
+
+  const degree = new Map<string, number>();
+  for (const c of cooc.cells) {
+    degree.set(c.codeA, (degree.get(c.codeA) ?? 0) + c.count);
+    degree.set(c.codeB, (degree.get(c.codeB) ?? 0) + c.count);
+  }
+  const relationPairs = relations.filter((r) => r.source.type === 'code' && r.target.type === 'code');
+  const ids = new Set<string>([
+    ...degree.keys(),
+    ...relationPairs.flatMap((r) => [r.source.id, r.target.id]),
+  ]);
+  if (ids.size === 0) {
+    return (
+      <EmptyNote>
+        Sin red todavía: codifica citas (co-ocurrencias) o crea relaciones entre códigos en la vista Códigos.
+      </EmptyNote>
+    );
+  }
+
+  const edges = cooc.cells.filter((c) => ids.has(c.codeA) && ids.has(c.codeB));
+  const maxCount = Math.max(1, cooc.maxCount);
+
+  // --- Layout: Fruchterman-Reingold simplificado, 300 iteraciones ---
+  const W = 820;
+  const H = 560;
+  const nodeList = Array.from(ids);
+  const idx = new Map(nodeList.map((id, i) => [id, i] as const));
+  const k = Math.sqrt((W * H) / nodeList.length);
+  const pos = nodeList.map((_, i) => ({
+    x: W / 2 + (W / 3) * Math.cos((2 * Math.PI * i) / nodeList.length),
+    y: H / 2 + (H / 3) * Math.sin((2 * Math.PI * i) / nodeList.length),
+  }));
+  const edgeIdx = edges.map((e) => [idx.get(e.codeA)!, idx.get(e.codeB)!, e.count] as const);
+  for (let it = 0; it < 300; it++) {
+    const temp = (1 - it / 300) * 60;
+    const dx = new Array<number>(nodeList.length).fill(0);
+    const dy = new Array<number>(nodeList.length).fill(0);
+    for (let i = 0; i < nodeList.length; i++) {
+      for (let j = i + 1; j < nodeList.length; j++) {
+        let ddx = pos[i]!.x - pos[j]!.x;
+        let ddy = pos[i]!.y - pos[j]!.y;
+        const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.01;
+        const f = (k * k) / dist;
+        ddx /= dist;
+        ddy /= dist;
+        dx[i]! += ddx * f;
+        dy[i]! += ddy * f;
+        dx[j]! -= ddx * f;
+        dy[j]! -= ddy * f;
+      }
+    }
+    for (const [a, b, count] of edgeIdx) {
+      let ddx = pos[a]!.x - pos[b]!.x;
+      let ddy = pos[a]!.y - pos[b]!.y;
+      const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.01;
+      // Las aristas con más co-ocurrencia atraen más fuerte (escala logarítmica).
+      const f = (dist * dist) / (k * (1 + Math.log2(1 + count)));
+      ddx /= dist;
+      ddy /= dist;
+      dx[a]! -= ddx * f;
+      dy[a]! -= ddy * f;
+      dx[b]! += ddx * f;
+      dy[b]! += ddy * f;
+    }
+    for (let i = 0; i < nodeList.length; i++) {
+      const disp = Math.sqrt(dx[i]! * dx[i]! + dy[i]! * dy[i]!) || 0.01;
+      const lim = Math.min(disp, temp) / disp;
+      pos[i]!.x = Math.max(50, Math.min(W - 50, pos[i]!.x + dx[i]! * lim));
+      pos[i]!.y = Math.max(40, Math.min(H - 40, pos[i]!.y + dy[i]! * lim));
+    }
+  }
+
+  const radius = (id: string) => 6 + Math.min(14, Math.sqrt(degree.get(id) ?? 0) * 3);
+  const connected = (id: string): boolean =>
+    relationPairs.some(
+      (r) => (r.source.id === focus && r.target.id === id) || (r.target.id === focus && r.source.id === id),
+    ) || edges.some((e) => (e.codeA === focus && e.codeB === id) || (e.codeB === focus && e.codeA === id));
+
+  return (
+    <div>
+      <p className="ws-hint">
+        Grosor = co-ocurrencias compartidas. Flechas naranjas = relaciones tipadas (etiqueta en la línea). Clic en un
+        nodo para aislarlo con sus conexiones; clic de nuevo para volver.
+      </p>
+      <svg className="net-svg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Red de códigos">
+        <defs>
+          <marker id="net-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#d97a2b" />
+          </marker>
+        </defs>
+        {edgeIdx.map(([a, b, count], i) => {
+          const dim = focus !== null && focus !== nodeList[a] && focus !== nodeList[b];
+          return (
+            <line
+              key={`cooc-${i}`}
+              x1={pos[a]!.x}
+              y1={pos[a]!.y}
+              x2={pos[b]!.x}
+              y2={pos[b]!.y}
+              stroke={`rgba(120, 135, 160, ${dim ? 0.06 : (0.18 + (count / maxCount) * 0.5).toFixed(2)})`}
+              strokeWidth={1 + (count / maxCount) * 5}
+            >
+              <title>{`${name(nodeList[a]!)} × ${name(nodeList[b]!)}: ${count} co-ocurrencia(s)`}</title>
+            </line>
+          );
+        })}
+        {relationPairs.map((r) => {
+          const a = idx.get(r.source.id);
+          const b = idx.get(r.target.id);
+          if (a === undefined || b === undefined) return null;
+          const dim = focus !== null && focus !== r.source.id && focus !== r.target.id;
+          return (
+            <g key={r.id} opacity={dim ? 0.12 : 1}>
+              <line
+                x1={pos[a]!.x}
+                y1={pos[a]!.y}
+                x2={pos[b]!.x}
+                y2={pos[b]!.y}
+                stroke="#d97a2b"
+                strokeWidth={2}
+                strokeDasharray="6 4"
+                markerEnd="url(#net-arrow)"
+              >
+                <title>{`${name(r.source.id)} —${r.relationType}→ ${name(r.target.id)}`}</title>
+              </line>
+              <text className="net-rel-label" x={(pos[a]!.x + pos[b]!.x) / 2} y={(pos[a]!.y + pos[b]!.y) / 2 - 5} textAnchor="middle">
+                {r.relationType}
+              </text>
+            </g>
+          );
+        })}
+        {nodeList.map((id, i) => (
+          <g
+            key={id}
+            className="net-node"
+            transform={`translate(${pos[i]!.x}, ${pos[i]!.y})`}
+            opacity={focus === null || focus === id || connected(id) ? 1 : 0.18}
+            onClick={() => setFocus((f) => (f === id ? null : id))}
+          >
+            <circle className="net-circle" r={radius(id)} />
+            <text className="net-label" y={radius(id) + 14} textAnchor="middle">
+              {short(name(id))}
+            </text>
+            <title>{`${name(id)} — ${degree.get(id) ?? 0} co-ocurrencia(s). Clic para aislar.`}</title>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
 }
 
 function EmptyNote({ children }: { children: ReactNode }) {
@@ -333,20 +534,40 @@ function WordBars({ report }: { report: WordFrequencyReport | undefined }) {
   const { items, language, totalTerms } = report;
   if (items.length === 0) return <EmptyNote>Aún no hay texto suficiente para contar palabras.</EmptyNote>;
   const max = Math.max(...items.map((i) => i.count), 1);
+  // Nube: tamaño y tono proporcionales a la frecuencia; el detalle numérico
+  // queda debajo en el listado de barras, con scroll.
+  const tones = ['#6ea8ff', '#4f8cff', '#93a3c2'];
   return (
     <div>
-      <p style={{ color: 'var(--text-dim)', fontSize: 13, marginTop: 0 }}>
+      <div className="cloud" role="img" aria-label="Nube de palabras frecuentes">
+        {items.map((i) => {
+          const ratio = i.count / max;
+          return (
+            <span
+              key={i.term}
+              className="cloud-word"
+              style={{ fontSize: Math.round(13 + ratio * 34), color: ratio > 0.6 ? tones[0] : ratio > 0.25 ? tones[1] : tones[2] }}
+              title={`${i.count} aparición(es) · ${(i.relative * 100).toFixed(2)}% del corpus`}
+            >
+              {i.term}
+            </span>
+          );
+        })}
+      </div>
+      <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>
         {totalTerms} término(s) tras filtrar palabras vacías del idioma «{language}».
       </p>
-      {items.map((i) => (
-        <div key={i.term} className="bar-row">
-          <span className="bar-label">{i.term}</span>
-          <span className="bar-track">
-            <span className="bar-fill" style={{ width: `${(i.count / max) * 100}%` }} />
-          </span>
-          <span className="bar-count">{i.count}</span>
-        </div>
-      ))}
+      <div className="cloud-detail">
+        {items.map((i) => (
+          <div key={i.term} className="bar-row">
+            <span className="bar-label">{i.term}</span>
+            <span className="bar-track">
+              <span className="bar-fill" style={{ width: `${(i.count / max) * 100}%` }} />
+            </span>
+            <span className="bar-count">{i.count}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -363,28 +584,97 @@ function CooccurrenceTable({
     return <EmptyNote>Aún no hay co-ocurrencias: ningún par de códigos comparte una cita.</EmptyNote>;
   }
   const name = (id: string) => codeNames.get(id) ?? id;
+
+  // Mapa de calor: sólo códigos con conexiones, ordenados por volumen total,
+  // acotado a MAX_MATRIX_COLUMNS×MAX_MATRIX_COLUMNS para que siga siendo legible.
+  const degree = new Map<string, number>();
+  for (const c of report.cells) {
+    degree.set(c.codeA, (degree.get(c.codeA) ?? 0) + c.count);
+    degree.set(c.codeB, (degree.get(c.codeB) ?? 0) + c.count);
+  }
+  const ids = Array.from(degree.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_MATRIX_COLUMNS)
+    .map(([id]) => id);
+  const cellCount = new Map(report.cells.map((c) => [`${c.codeA}\u0000${c.codeB}`, c.count]));
+  const pairCount = (a: string, b: string): number | null => {
+    if (a === b) return null;
+    return cellCount.get(`${a}\u0000${b}`) ?? cellCount.get(`${b}\u0000${a}`) ?? 0;
+  };
+  const maxCount = report.maxCount || 1;
+  const hiddenCodes = degree.size - ids.length;
+
   return (
-    <div className="table-wrap">
-      <table className="data">
-        <thead>
-          <tr>
-            <th>Código A</th>
-            <th>Código B</th>
-            <th className="num">Citas compartidas</th>
-          </tr>
-        </thead>
-        <tbody>
-          {report.cells.map((c) => (
-            <tr key={`${c.codeA}|${c.codeB}`}>
-              <td>
-                <strong>{name(c.codeA)}</strong>
-              </td>
-              <td>{name(c.codeB)}</td>
-              <td className="num">{c.count}</td>
+    <div>
+      <p style={{ color: 'var(--text-dim)', fontSize: 13, marginTop: 0 }}>
+        Mapa de calor de co-ocurrencia: pasa el cursor por una celda para ver el par exacto. La
+        intensidad marca citas compartidas; la diagonal queda vacía por definición.
+      </p>
+      <div className="table-wrap heat-wrap">
+        <table className="data heat">
+          <thead>
+            <tr>
+              <th />
+              {ids.map((id) => (
+                <th key={id} className="heat-head" title={name(id)}>
+                  <span>{name(id)}</span>
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {ids.map((rowId) => (
+              <tr key={rowId}>
+                <th className="heat-row-head">{name(rowId)}</th>
+                {ids.map((colId) => {
+                  const value = pairCount(rowId, colId);
+                  const opacity =
+                    value === null ? 0.05 : value === 0 ? 0.03 : 0.12 + (value / maxCount) * 0.78;
+                  return (
+                    <td
+                      key={colId}
+                      className="num heat-cell"
+                      title={value === null ? undefined : `${name(rowId)} × ${name(colId)}: ${value}`}
+                      style={{ background: `rgba(96, 149, 255, ${opacity.toFixed(3)})` }}
+                    >
+                      {value === null || value === 0 ? '' : value}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {hiddenCodes > 0 && (
+        <p style={{ color: 'var(--text-dim)', fontSize: 12, marginTop: 6 }}>
+          +{hiddenCodes} código(s) con conexiones no mostrados en el mapa.
+        </p>
+      )}
+
+      <h3 style={{ margin: '18px 0 8px', fontSize: 14 }}>Pares en detalle</h3>
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Código A</th>
+              <th>Código B</th>
+              <th className="num">Citas compartidas</th>
+            </tr>
+          </thead>
+          <tbody>
+            {report.cells.map((c) => (
+              <tr key={`${c.codeA}|${c.codeB}`}>
+                <td>
+                  <strong>{name(c.codeA)}</strong>
+                </td>
+                <td>{name(c.codeB)}</td>
+                <td className="num">{c.count}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -414,6 +704,7 @@ function MatrixTable({
   const shownCodes = withEvidence.slice(0, MAX_MATRIX_COLUMNS);
   const overflow = withEvidence.length - shownCodes.length;
   const documents = report.documentIds;
+  const maxCell = Math.max(1, ...report.cells.map((c) => c.quotationCount));
 
   if (documents.length === 0) return <EmptyNote>El proyecto aún no tiene documentos.</EmptyNote>;
 
@@ -439,8 +730,13 @@ function MatrixTable({
                 </td>
                 {shownCodes.map((codeId) => {
                   const value = counts.get(`${documentId}\u0000${codeId}`);
+                  const opacity = value ? 0.1 + (value / maxCell) * 0.75 : 0;
                   return (
-                    <td key={codeId} className="num">
+                    <td
+                      key={codeId}
+                      className="num"
+                      style={value ? { background: `rgba(96, 149, 255, ${opacity.toFixed(3)})` } : undefined}
+                    >
                       {value ?? ''}
                     </td>
                   );
@@ -684,6 +980,31 @@ function FrameworkRows({ report }: { report: FrameworkMatrixReport | undefined }
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function DensityBars({ rows }: { rows: CodingDensityRow[] | undefined }) {
+  if (rows === undefined) return null;
+  if (rows.length === 0) {
+    return <EmptyNote>Registra investigadoras en «Codificar» (barra superior) para ver su actividad.</EmptyNote>;
+  }
+  const max = Math.max(...rows.map((r) => r.quotations), 1);
+  return (
+    <div>
+      <p style={{ color: 'var(--text-dim)', fontSize: 13, marginTop: 0 }}>
+        Citas distintas codificadas por cada investigadora (los códigos múltiples sobre una misma
+        cita cuentan una vez). Con dos o más codificadoras, revisa la pestaña «Fiabilidad».
+      </p>
+      {rows.map((r) => (
+        <div key={r.researcherId} className="bar-row">
+          <span className="bar-label">{r.researcherName}</span>
+          <span className="bar-track">
+            <span className="bar-fill" style={{ width: `${(r.quotations / max) * 100}%` }} />
+          </span>
+          <span className="bar-count">{r.quotations}</span>
+        </div>
+      ))}
     </div>
   );
 }

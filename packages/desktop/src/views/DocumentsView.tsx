@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
-import type { Quotation, SourceDocument } from '@qualicanvas/core';
+import type { Attribute, Quotation, SourceDocument } from '@qualicanvas/core';
 import { qwal } from '../api';
 import { useApp } from '../App';
 import { formatDateTime, joinWarnings } from '../utils';
@@ -15,13 +15,30 @@ export default function DocumentsView() {
   const [quotations, setQuotations] = useState<Quotation[]>([]);
   const [busyImport, setBusyImport] = useState(false);
 
+  // Atributos de casos: variables que describen cada documento (framework).
+  const [attrs, setAttrs] = useState<Attribute[]>([]);
+  const [attrValues, setAttrValues] = useState<Record<string, Record<string, string | null>>>({});
+  const [attrFormOpen, setAttrFormOpen] = useState(false);
+  const [newAttrName, setNewAttrName] = useState('');
+  const [newAttrType, setNewAttrType] = useState<Attribute['dataType']>('string');
+
   const refresh = useCallback(async () => {
     if (!activeProject) return;
     setError(null);
     setLoading(true);
     try {
-      const list = await qwal.documents.list();
+      const [list, attrList, valueRows] = await Promise.all([
+        qwal.documents.list(),
+        qwal.attributes.list(),
+        qwal.attributes.values(),
+      ]);
       setDocs(list);
+      setAttrs(attrList);
+      const grouped: Record<string, Record<string, string | null>> = {};
+      for (const row of valueRows) {
+        (grouped[row.documentId] ??= {})[row.attributeId] = row.value;
+      }
+      setAttrValues(grouped);
       // Limpiar selección si el documento ya no existe
       setSelectedId((prev) => {
         if (prev && !list.some((d) => d.id === prev)) {
@@ -101,6 +118,61 @@ export default function DocumentsView() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  const handleAddAttribute = async () => {
+    const name = newAttrName.trim();
+    if (!name) return;
+    try {
+      await qwal.attributes.create({ name, dataType: newAttrType });
+      setNewAttrName('');
+      setAttrFormOpen(false);
+      await refresh();
+      notice('ok', `Atributo «${name}» creado`);
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleRemoveAttribute = async (a: Attribute) => {
+    if (!window.confirm(`¿Eliminar el atributo «${a.name}» y todos sus valores?`)) return;
+    try {
+      await qwal.attributes.remove(a.id);
+      await refresh();
+      notice('ok', 'Atributo eliminado');
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleSetValue = async (documentId: string, attributeId: string, value: string | null) => {
+    try {
+      await qwal.attributes.setValue(documentId, attributeId, value);
+      setAttrValues((prev) => {
+        const docRow = { ...(prev[documentId] ?? {}) };
+        if (value === null) delete docRow[attributeId];
+        else docRow[attributeId] = value;
+        return { ...prev, [documentId]: docRow };
+      });
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Autosave con debounce: guardar en cada pulsación (400 ms) en vez de sólo
+  // en blur, para no perder el valor si la ventana se cierra sin salir del campo.
+  const cellTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const scheduleSetValue = (documentId: string, attributeId: string, value: string | null) => {
+    const key = `${documentId}-${attributeId}`;
+    const prev = cellTimers.current.get(key);
+    if (prev) clearTimeout(prev);
+    cellTimers.current.set(
+      key,
+      setTimeout(() => {
+        cellTimers.current.delete(key);
+        void handleSetValue(documentId, attributeId, value);
+      }, 400),
+    );
   };
 
   if (!activeProject) {
@@ -214,6 +286,116 @@ export default function DocumentsView() {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          <div className="card" style={{ marginTop: 18 }}>
+            <div className="card-title">
+              <h3>Atributos de los casos</h3>
+              <button type="button" className="btn btn-sm" onClick={() => setAttrFormOpen((v) => !v)}>
+                {attrFormOpen ? 'Cancelar' : '＋ Atributo'}
+              </button>
+            </div>
+            <p style={{ color: 'var(--text-dim)', fontSize: 13, marginTop: 0 }}>
+              Variables que describen cada documento (grupo, edad, fecha de entrevista…). La
+              «Matriz de marco» de Análisis las muestra junto a cada caso. Los cambios se guardan
+              al salir del campo.
+            </p>
+            {attrFormOpen && (
+              <div className="attr-form">
+                <input
+                  type="text"
+                  placeholder="Nombre del atributo (p. ej. Grupo de edad)"
+                  value={newAttrName}
+                  onChange={(e) => setNewAttrName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleAddAttribute();
+                  }}
+                />
+                <select
+                  value={newAttrType}
+                  onChange={(e) => setNewAttrType(e.target.value as Attribute['dataType'])}
+                >
+                  <option value="string">Texto</option>
+                  <option value="number">Número</option>
+                  <option value="boolean">Sí / No</option>
+                  <option value="date">Fecha</option>
+                </select>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={!newAttrName.trim()}
+                  onClick={() => void handleAddAttribute()}
+                >
+                  Crear
+                </button>
+              </div>
+            )}
+            {attrs.length === 0 ? (
+              <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+                Sin atributos todavía: crea el primero para describir tus casos.
+              </p>
+            ) : (
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Documento</th>
+                      {attrs.map((a) => (
+                        <th key={a.id}>
+                          <span className="attr-head">
+                            {a.name}
+                            <button
+                              type="button"
+                              className="attr-remove"
+                              title={`Eliminar «${a.name}»`}
+                              onClick={() => void handleRemoveAttribute(a)}
+                            >
+                              ✕
+                            </button>
+                          </span>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(docs ?? []).map((d) => (
+                      <tr key={d.id}>
+                        <td>{d.title}</td>
+                        {attrs.map((a) => {
+                          const current = attrValues[d.id]?.[a.id] ?? null;
+                          return (
+                            <td key={a.id}>
+                              {a.dataType === 'boolean' ? (
+                                <input
+                                  type="checkbox"
+                                  checked={current === 'true'}
+                                  onChange={(e) =>
+                                    void handleSetValue(d.id, a.id, e.target.checked ? 'true' : 'false')
+                                  }
+                                />
+                              ) : a.dataType === 'date' ? (
+                                <input
+                                  type="date"
+                                  value={current ? current.slice(0, 10) : ''}
+                                  onChange={(e) => scheduleSetValue(d.id, a.id, e.target.value || null)}
+                                />
+                              ) : (
+                                <input
+                                  type={a.dataType === 'number' ? 'number' : 'text'}
+                                  className="attr-input"
+                                  value={current ?? ''}
+                                  onChange={(e) => scheduleSetValue(d.id, a.id, e.target.value.trim() || null)}
+                                />
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           {selectedDoc && (

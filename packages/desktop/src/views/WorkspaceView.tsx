@@ -23,6 +23,29 @@ import { formatDateTime } from '../utils';
 
 interface Selection { start: number; end: number }
 
+type MediaKind = 'audio' | 'video' | 'image' | null;
+
+function mediaKindOf(fileType: string | undefined): MediaKind {
+  if (!fileType) return null;
+  if (['mp3', 'wav', 'm4a'].includes(fileType)) return 'audio';
+  if (['mp4', 'webm'].includes(fileType)) return 'video';
+  if (['jpg', 'png', 'webp'].includes(fileType)) return 'image';
+  return null;
+}
+
+/** Ruta Windows → URL file:// para <audio>/<video>/<img> del renderer. */
+function fileUrl(p: string): string {
+  // shortcut: un '#' en la ruta rompería la URL; renombrar el archivo si aparece.
+  return encodeURI(`file:///${p.replace(/\\/g, '/').replace(/^\//, '')}`);
+}
+
+/** Segundos → m:ss para etiquetas de fragmentos de media. */
+function fmtTs(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 /** Aplana el árbol de códigos conservando la ruta legible de cada nodo. */
 function flattenCodes(nodes: CodeTreeNode[]): CodeTreeNode[] {
   const out: CodeTreeNode[] = [];
@@ -47,7 +70,8 @@ export default function WorkspaceView() {
 
   const [codes, setCodes] = useState<CodeTreeNode[]>([]);
   const [codeFilter, setCodeFilter] = useState('');
-  const [codeOpen, setCodeOpen] = useState<Record<string, boolean>>({});
+  /** Si tiene texto, el click en un código autocodifica ese término en todo el proyecto. */
+  const [autoTerm, setAutoTerm] = useState('');
 
   const [researchers, setResearchers] = useState<Researcher[]>([]);
   const [researcherId, setResearcherId] = useState<string>('');
@@ -60,8 +84,18 @@ export default function WorkspaceView() {
   const [memoTitle, setMemoTitle] = useState('');
   const [memoBody, setMemoBody] = useState('');
 
+  // Alta de investigadoras en línea (window.prompt no existe en Electron).
+  const [researcherFormOpen, setResearcherFormOpen] = useState(false);
+  const [newResearcherName, setNewResearcherName] = useState('');
+
+  // Documentos multimedia: reproductor + captura de rangos.
+  const [docMeta, setDocMeta] = useState<SourceDocument | null>(null);
+  const mediaRef = useRef<HTMLVideoElement | null>(null);
+  const [mediaRange, setMediaRange] = useState<{ startTs: number; endTs: number } | null>(null);
+  const [mediaLabel, setMediaLabel] = useState('');
+  const [transcribing, setTranscribing] = useState(false);
+
   const [busy, setBusy] = useState(false);
-  const textRef = useRef<HTMLDivElement | null>(null);
 
   const activeResearcher = researchers.find((r) => r.id === researcherId) ?? null;
 
@@ -110,9 +144,13 @@ export default function WorkspaceView() {
     setSelection(null);
     setMemoFor(null);
     setDocText('');
+    setDocMeta(null);
+    setMediaRange(null);
+    setMediaLabel('');
     try {
       const doc = await qwal.documents.get(id);
       setDocText(doc?.text ?? '');
+      setDocMeta(doc?.document ?? null);
       await refreshQuotes(id);
     } catch (e) {
       notice('error', e instanceof Error ? e.message : String(e));
@@ -170,9 +208,79 @@ export default function WorkspaceView() {
     }
   }, [activeResearcher, docId, docText, notice, quotations, refreshQuotes]);
 
+  /**
+   * Autocodificación semántica: cada coincidencia KWIC del término en todo el
+   * proyecto se convierte en cita y recibe el código. Las coincidencias que ya
+   * tenían cita (conflict por UNIQUE) reutilizan la existente y solo añaden el
+   * código.
+   */
+  const handleAutoCode = useCallback(async (code: CodeTreeNode, term: string) => {
+    if (!docId) return;
+    setBusy(true);
+    try {
+      const report = await qwal.analysis.kwic(term, 0);
+      const hits = report.entries;
+      if (hits.length === 0) {
+        notice('ok', `Sin coincidencias para «${term}» en el proyecto.`);
+        return;
+      }
+      const docs = new Set(hits.map((h) => h.documentId)).size;
+      const ok = window.confirm(
+        `«${term}» aparece ${hits.length} vez/veces en ${docs} documento(s).\n` +
+          `¿Crear una cita por coincidencia y codificarlas todas como «${code.path}»?`,
+      );
+      if (!ok) return;
+      const quoteCache = new Map<string, Quotation[]>();
+      const findExisting = async (dId: string, s: number, e: number): Promise<Quotation | undefined> => {
+        if (!quoteCache.has(dId)) quoteCache.set(dId, await qwal.quotations.listByDocument(dId));
+        return quoteCache
+          .get(dId)!
+          .find((q) => q.anchor.kind === 'text' && q.anchor.startPos === s && q.anchor.endPos === e);
+      };
+      let created = 0;
+      let reused = 0;
+      let failed = 0;
+      for (const h of hits) {
+        try {
+          const q = await qwal.quotations.create({
+            documentId: h.documentId,
+            anchor: { kind: 'text', documentId: h.documentId, startPos: h.matchStart, endPos: h.matchEnd },
+            segmentText: h.match,
+            createdBy: activeResearcher?.name ?? null,
+          });
+          await qwal.coding.assign(q.id, code.id, activeResearcher?.id ?? null);
+          created++;
+        } catch (err) {
+          if (err instanceof ApiError && err.code === 'conflict') {
+            const existing = await findExisting(h.documentId, h.matchStart, h.matchEnd);
+            if (existing) {
+              await qwal.coding.assign(existing.id, code.id, activeResearcher?.id ?? null);
+              reused++;
+            } else {
+              failed++;
+            }
+          } else {
+            failed++;
+          }
+        }
+      }
+      await refreshQuotes(docId);
+      notice('ok', `Autocodificado «${code.name}»: ${created} cita(s) nueva(s), ${reused} existente(s)${failed ? `, ${failed} fallida(s)` : ''}.`);
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [activeResearcher, docId, notice, refreshQuotes]);
+
   /** Click en un código: con selección crea la cita y asigna; con cita activa solo asigna. */
   const handleCodeClick = useCallback(async (code: CodeTreeNode) => {
     if (!docId) return;
+    const term = autoTerm.trim();
+    if (term) {
+      await handleAutoCode(code, term);
+      return;
+    }
     setBusy(true);
     try {
       let quoteId = selectedQuoteId;
@@ -195,7 +303,7 @@ export default function WorkspaceView() {
     } finally {
       setBusy(false);
     }
-  }, [activeResearcher, clearSelection, createQuotation, docId, notice, selectedQuoteId, selection]);
+  }, [activeResearcher, autoTerm, clearSelection, createQuotation, docId, handleAutoCode, notice, selectedQuoteId, selection]);
 
   const handleUnassign = useCallback(async (quoteId: string, codeId: string) => {
     try {
@@ -251,16 +359,60 @@ export default function WorkspaceView() {
   }, [activeResearcher, memoBody, memoFor, memoTitle, notice]);
 
   const handleCreateResearcher = useCallback(async () => {
-    const name = window.prompt('Nombre de la investigadora:');
-    if (!name || !name.trim()) return;
+    const name = newResearcherName.trim();
+    if (!name) return;
     try {
-      const r = await qwal.researchers.create({ name: name.trim() });
+      const r = await qwal.researchers.create({ name });
       setResearchers((prev) => [...prev, r]);
       pickResearcher(r.id);
+      setNewResearcherName('');
+      setResearcherFormOpen(false);
+      notice('ok', `Investigadora «${name}» registrada`);
     } catch (e) {
       notice('error', e instanceof Error ? e.message : String(e));
     }
-  }, [notice, pickResearcher]);
+  }, [newResearcherName, notice, pickResearcher]);
+
+  /** Cita de audio/vídeo: el ancla es el rango de tiempo marcado, en segundos. */
+  const handleCreateMediaQuote = useCallback(async () => {
+    if (!docId || !mediaRange || mediaRange.endTs <= mediaRange.startTs) return;
+    setBusy(true);
+    try {
+      const label = mediaLabel.trim() || `${fmtTs(mediaRange.startTs)} – ${fmtTs(mediaRange.endTs)}`;
+      const q = await qwal.quotations.create({
+        documentId: docId,
+        anchor: { kind: 'media', documentId: docId, startTs: mediaRange.startTs, endTs: mediaRange.endTs },
+        segmentText: label,
+        createdBy: activeResearcher?.name ?? null,
+      });
+      setSelectedQuoteId(q.id);
+      setMediaRange(null);
+      setMediaLabel('');
+      await refreshQuotes(docId);
+      notice('ok', 'Cita creada: púlsa un código para codificarla');
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [activeResearcher, docId, mediaLabel, mediaRange, notice, refreshQuotes]);
+
+  /** Transcribe el archivo con Whisper (CLI local) y crea un documento de texto. */
+  const handleTranscribe = useCallback(async () => {
+    if (!docMeta?.filePath) return;
+    setTranscribing(true);
+    try {
+      const { text } = await qwal.media.transcribe(docMeta.filePath);
+      const title = `${docMeta.title.replace(/\.[^.]+$/, '')} — transcripción`;
+      const result = await qwal.documents.createText({ title, text });
+      setDocs(await qwal.documents.list());
+      notice('ok', `Transcripción lista: «${result.title}» (${result.textLength} caracteres)`);
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    } finally {
+      setTranscribing(false);
+    }
+  }, [docMeta, notice]);
 
   /** Segmentos texto/marca con data-start absoluto para el cálculo de offsets. */
   const segments = useMemo(() => {
@@ -330,9 +482,36 @@ export default function WorkspaceView() {
               </option>
             ))}
           </select>
-          <button type="button" className="btn btn-sm" onClick={() => void handleCreateResearcher()}>
-            + Añadir
-          </button>
+          {!researcherFormOpen ? (
+            <button type="button" className="btn btn-sm" onClick={() => setResearcherFormOpen(true)}>
+              + Añadir
+            </button>
+          ) : (
+            <>
+              <input
+                type="text"
+                placeholder="Nombre de la investigadora…"
+                value={newResearcherName}
+                autoFocus
+                onChange={(e) => setNewResearcherName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void handleCreateResearcher();
+                  if (e.key === 'Escape') setResearcherFormOpen(false);
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                disabled={!newResearcherName.trim()}
+                onClick={() => void handleCreateResearcher()}
+              >
+                Guardar
+              </button>
+              <button type="button" className="btn btn-sm btn-ghost" onClick={() => setResearcherFormOpen(false)}>
+                ✕
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -355,11 +534,92 @@ export default function WorkspaceView() {
           </div>
         </div>
 
-        {/* --- Texto del documento --- */}
+        {/* --- Texto del documento (o reproductor multimedia) --- */}
         <div className="ws-pane ws-text-pane">
           {!docId ? (
             <div className="ws-hint-block">
               <p>Elige un documento de la izquierda para empezar a codificar.</p>
+            </div>
+          ) : mediaKindOf(docMeta?.fileType) && docMeta?.filePath ? (
+            <div className="ws-media">
+              {mediaKindOf(docMeta.fileType) === 'image' ? (
+                <>
+                  <img className="ws-media-img" src={fileUrl(docMeta.filePath)} alt={docMeta.title} />
+                  {/* shortcut: la imagen se muestra completa; la codificación por regiones (bbox) exige selección de área — hacerla si se pide. */}
+                  <p className="ws-hint">
+                    Imágenes: se muestran completas por ahora; la codificación por regiones llegará después.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="ws-text-toolbar">
+                    <span className="ws-hint">
+                      Marca inicio y fin del fragmento, crea la cita y púlsa un código. O pide la transcripción con Whisper.
+                    </span>
+                  </div>
+                  <div className="ws-media-view">
+                    {mediaKindOf(docMeta.fileType) === 'audio' ? (
+                      <audio ref={mediaRef} controls src={fileUrl(docMeta.filePath)} style={{ width: '100%' }} />
+                    ) : (
+                      <video ref={mediaRef} controls src={fileUrl(docMeta.filePath)} style={{ width: '100%', maxHeight: 340 }} />
+                    )}
+                    <div className="ws-media-controls">
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() =>
+                          setMediaRange((r) => ({
+                            startTs: mediaRef.current?.currentTime ?? 0,
+                            endTs: r?.endTs ?? (mediaRef.current?.currentTime ?? 0) + 1,
+                          }))
+                        }
+                      >
+                        Ⓐ Inicio aquí
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() =>
+                          setMediaRange((r) => ({
+                            startTs: r?.startTs ?? Math.max(0, (mediaRef.current?.currentTime ?? 1) - 5),
+                            endTs: mediaRef.current?.currentTime ?? 1,
+                          }))
+                        }
+                      >
+                        Ⓑ Fin aquí
+                      </button>
+                      <span className="ws-selection-info">
+                        {mediaRange ? `${fmtTs(mediaRange.startTs)} – ${fmtTs(mediaRange.endTs)}` : 'sin rango marcado'}
+                      </span>
+                      <input
+                        type="text"
+                        className="attr-input"
+                        style={{ maxWidth: 220 }}
+                        placeholder="Etiqueta del fragmento (opcional)"
+                        value={mediaLabel}
+                        onChange={(e) => setMediaLabel(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-primary"
+                        disabled={busy || !mediaRange || mediaRange.endTs <= mediaRange.startTs}
+                        onClick={() => void handleCreateMediaQuote()}
+                      >
+                        Crear cita
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={transcribing}
+                        title="Requiere Whisper instalado: pip install -U openai-whisper"
+                        onClick={() => void handleTranscribe()}
+                      >
+                        {transcribing ? 'Transcribiendo… (puede tardar minutos)' : '🗣 Transcribir (Whisper)'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             <>
@@ -392,7 +652,6 @@ export default function WorkspaceView() {
                 )}
               </div>
               <div
-                ref={textRef}
                 className="ws-text"
                 onMouseUp={handleMouseUp}
               >
@@ -429,6 +688,19 @@ export default function WorkspaceView() {
             value={codeFilter}
             onChange={(e) => setCodeFilter(e.target.value)}
           />
+          <input
+            type="search"
+            className="ws-code-filter"
+            placeholder="Autocodificar término (opcional)…"
+            value={autoTerm}
+            onChange={(e) => setAutoTerm(e.target.value)}
+            title="Si escribes un término aquí, pulsar un código crea una cita por cada coincidencia del término en TODO el proyecto y las codifica con ese código."
+          />
+          {autoTerm.trim() && (
+            <p className="ws-hint">
+              Modo autocodificar: «{autoTerm.trim()}» — pulsar un código aplicará sus coincidencias en todo el proyecto.
+            </p>
+          )}
           <div className="ws-scroll ws-code-list">
             {visibleCodes.length === 0 && <p className="ws-hint">Sin códigos. Créalos en la vista Códigos.</p>}
             {visibleCodes.map((c) => (
@@ -482,9 +754,25 @@ export default function WorkspaceView() {
                 </div>
                 <div className="ws-quote-actions" onClick={(e) => e.stopPropagation()}>
                   <span className="ws-quote-meta">
-                    {q.createdBy ? `${q.createdBy} · ` : ''}
-                    {formatDateTime(q.createdAt)}
+                    {q.anchor.kind === 'media'
+                      ? `⏱ ${fmtTs(q.anchor.startTs)} – ${fmtTs(q.anchor.endTs)}`
+                      : `${q.createdBy ? `${q.createdBy} · ` : ''}${formatDateTime(q.createdAt)}`}
                   </span>
+                  {q.anchor.kind === 'media' && (mediaKindOf(docMeta?.fileType) === 'audio' || mediaKindOf(docMeta?.fileType) === 'video') && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost"
+                      title="Reproducir desde el inicio del fragmento"
+                      onClick={() => {
+                        if (mediaRef.current) {
+                          mediaRef.current.currentTime = Math.max(0, q.anchor.kind === 'media' ? q.anchor.startTs : 0);
+                          void mediaRef.current.play();
+                        }
+                      }}
+                    >
+                      ⏵
+                    </button>
+                  )}
                   <button type="button" className="btn btn-sm btn-ghost" onClick={() => void openMemoForm(q.id)}>
                     📝 Memos
                   </button>

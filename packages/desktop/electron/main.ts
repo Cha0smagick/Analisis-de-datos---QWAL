@@ -14,7 +14,9 @@
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 
 import {
@@ -28,6 +30,7 @@ import {
   SqliteDocumentImporter,
   type DbDriver,
   type FileType,
+  type ImportResult,
   type MemoTargetType,
   type Project,
   type RelationEntityType,
@@ -81,6 +84,21 @@ function extToFileType(file: string): FileType {
 
 /** Extensiones sin punto inicial, tal como las espera el diálogo de archivos. */
 const SUPPORTED_EXTENSIONS = Object.keys(EXT_TO_FILE_TYPE).map((ext) => ext.slice(1));
+
+/**
+ * Texto de siembra para la prueba E2E (canal `__e2e:seed`, sólo con E2E_SMOKE=1):
+ * dos "entrevistas" cortas con contenido repetitivo para poder autocodificar.
+ */
+const E2E_SAMPLE_TEXT = [
+  'Entrevista 1 — María',
+  'La comunidad organiza la limpieza del río cada primer sábado de mes. Los jóvenes colaboran con entusiasmo.',
+  'El agua está contaminada por el vertido de la fábrica. La contaminación preocupa a todos los vecinos.',
+  'Confío en que el nuevo comité de agua resolverá el problema de la contaminación.',
+  '',
+  'Entrevista 2 — Jorge',
+  'Yo no colaboro con el comité porque no confío en sus decisiones sobre el agua.',
+  'La contaminación del río empeoró este año; la fábrica no ha cambiado nada.',
+].join('\n\n');
 
 function requireDriver(): DbDriver {
   if (!driver) throw new Error('No hay una base de datos abierta.');
@@ -207,13 +225,18 @@ function registerIpc(): void {
   const a = () => getSession().services.analysis;
 
   // --- Base de datos -------------------------------------------------------
-  handle('db:open', async (): Promise<DbOpenResult | null> => {
-    const picked = await dialog.showOpenDialog({
-      properties: ['openFile'],
-      filters: [{ name: 'SQLite', extensions: ['db', 'sqlite', 'sqlite3'] }],
-    });
-    if (picked.canceled || picked.filePaths.length === 0) return null;
-    return openDatabase(picked.filePaths[0]!);
+  handle('db:open', async (filePath?: string): Promise<DbOpenResult | null> => {
+    // Con ruta explícita (restauración de la última sesión) no se pide diálogo.
+    let file = filePath;
+    if (!file) {
+      const picked = await dialog.showOpenDialog({
+        properties: ['openFile'],
+        filters: [{ name: 'SQLite', extensions: ['db', 'sqlite', 'sqlite3'] }],
+      });
+      if (picked.canceled || picked.filePaths.length === 0) return null;
+      file = picked.filePaths[0]!;
+    }
+    return openDatabase(file);
   });
 
   handle('db:create', async (): Promise<DbOpenResult | null> => {
@@ -279,6 +302,45 @@ function registerIpc(): void {
 
   handle('documents:remove', (documentId: string) => s().repos.documents.remove(documentId));
 
+  // Creación directa de un documento de texto (transcripciones, pegados, E2E).
+  handle('documents:createText', async (input: { title: string; text: string; language?: string }) =>
+    (await s().importer).importText(requireProjectId(), input.title, input.text, { language: input.language }));
+
+  // --- Transcripción (Whisper local) ---------------------------------------
+  handle('media:transcribe', async (filePath: string): Promise<{ text: string }> => {
+    if (!filePath) throw new Error('El documento no tiene archivo de audio o vídeo asociado.');
+    const dir = await mkdtemp(path.join(tmpdir(), 'qc-whisper-'));
+    try {
+      // Puente al CLI de Whisper (openai-whisper u otro compatible). La
+      // transcripción corre en el equipo; nada sale de él.
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('whisper', [filePath, '--output_format', 'txt', '--output_dir', dir], {
+          windowsHide: true,
+        });
+        let stderr = '';
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        child.on('error', (err: NodeJS.ErrnoException) => {
+          reject(new Error(
+            err.code === 'ENOENT'
+              ? 'Whisper no está instalado o no está en el PATH. Instálalo con: pip install -U openai-whisper'
+              : `No se pudo ejecutar Whisper: ${err.message}`,
+          ));
+        });
+        child.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Whisper terminó con código ${code}. ${stderr.slice(-800)}`));
+        });
+      });
+      const stem = path.basename(filePath, path.extname(filePath));
+      const text = await readFile(path.join(dir, `${stem}.txt`), 'utf8');
+      return { text: text.trim() };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   // --- Códigos -------------------------------------------------------------
   handle('codes:list', () => s().repos.codes.listByProject(requireProjectId()));
   handle('codes:tree', () => s().repos.codes.tree(requireProjectId()));
@@ -343,7 +405,49 @@ function registerIpc(): void {
     }));
   handle('relations:listForEntity', (entityType: string, entityId: string) =>
     s().repos.relations.listForEntity(relationEntity(entityType), entityId));
+  handle('relations:list', () => s().repos.relations.listByProject(requireProjectId()));
+  handle('relations:create', (input: { sourceType: string; sourceId: string; targetType: string; targetId: string; relationType?: string; label?: string | null }) =>
+    s().repos.relations.create({
+      projectId: requireProjectId(),
+      source: { type: relationEntity(input.sourceType), id: input.sourceId },
+      target: { type: relationEntity(input.targetType), id: input.targetId },
+      relationType: input.relationType,
+      label: input.label ?? null,
+    }));
+  handle('relations:remove', (relationId: string) => s().repos.relations.remove(relationId));
   handle('attributes:list', () => s().repos.attributes.listAttributes(requireProjectId()));
+  handle('attributes:create', (input: { name: string; dataType: string }) => {
+    const types: readonly string[] = ['string', 'number', 'boolean', 'date'];
+    if (!types.includes(input.dataType)) throw new Error(`Tipo de atributo no válido: ${input.dataType}`);
+    return s().repos.attributes.createAttribute(requireProjectId(), {
+      name: input.name,
+      dataType: input.dataType as 'string' | 'number' | 'boolean' | 'date',
+    });
+  });
+  handle('attributes:setValue', (documentId: string, attributeId: string, value: string | null) =>
+    s().repos.attributes.setValue(documentId, attributeId, value));
+  handle('attributes:remove', (attributeId: string) => s().repos.attributes.removeAttribute(attributeId));
+  handle('attributes:values', () => {
+    const map = s().repos.attributes.valuesForProject(requireProjectId());
+    return Array.from(map.values()).flat();
+  });
+
+  // --- Prueba E2E (sólo con E2E_SMOKE=1) -----------------------------------
+  // Siembra un documento de texto sin diálogos nativos: la prueba automatizada
+  // no puede hacer clic en un diálogo del sistema.
+  if (process.env.E2E_SMOKE === '1') {
+    handle('__e2e:seed', async (title: string): Promise<ImportResult> => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'qc-e2e-'));
+      try {
+        const file = path.join(dir, `${title}.txt`);
+        await writeFile(file, E2E_SAMPLE_TEXT, 'utf8');
+        const importer = new SqliteDocumentImporter(s().repos.documents);
+        return await importer.importInto(requireProjectId(), new NodeFileSource(file), 'txt');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  }
 
   // --- Búsqueda ------------------------------------------------------------
   handle('search:query', (query: string, options?: { limit?: number; offset?: number; near?: number }) =>
@@ -381,7 +485,8 @@ function createWindow(): void {
   if (devServer) {
     void mainWindow.loadURL(devServer);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    // Desde dist-electron/electron/main.js, el renderer queda en ../../dist.
+    void mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
 
   mainWindow.on('closed', () => {

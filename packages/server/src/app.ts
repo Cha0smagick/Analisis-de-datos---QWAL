@@ -301,6 +301,19 @@ export function createApp(options: { dataDir: string; defaultDbPath: string }): 
   app.get('/api/documents', wrap(() => getSession().repos.documents.listByProject(requireProjectId())));
 
   app.post(
+    '/api/documents/text',
+    wrap(async (req) => {
+      const body = (req.body ?? {}) as { title?: string; text?: string; language?: string };
+      const title = body.title?.trim();
+      if (!title || !body.text) throw new Error('title y text son obligatorios.');
+      const importer = await getSession().importer;
+      return importer.importText(requireProjectId(), title, body.text, {
+        language: body.language,
+      });
+    }),
+  );
+
+  app.post(
     '/api/documents/import',
     upload.array('files', 100),
     wrap(async (req) => {
@@ -611,15 +624,85 @@ export function createApp(options: { dataDir: string; defaultDbPath: string }): 
     '/api/relations',
     wrap((req) => {
       const q = req.query as { entityType?: string; entityId?: string };
-      const entityType = q.entityType;
-      const entityId = q.entityId;
-      if (!entityType || !entityId) throw new Error('entityType y entityId son obligatorios.');
-      if (!RELATION_ENTITIES.has(entityType)) throw new Error(`entityType no válido: ${entityType}`);
-      return getSession().repos.relations.listForEntity(entityType as RelationEntityType, entityId);
+      // Con entityType+entityId lista las relaciones de esa entidad; sin ellos, todas.
+      if (q.entityType && q.entityId) {
+        if (!RELATION_ENTITIES.has(q.entityType)) throw new Error(`entityType no válido: ${q.entityType}`);
+        return getSession().repos.relations.listForEntity(q.entityType as RelationEntityType, q.entityId);
+      }
+      return getSession().repos.relations.listByProject(requireProjectId());
     }),
   );
 
+  app.post(
+    '/api/relations',
+    wrap((req) => {
+      const body = (req.body ?? {}) as {
+        sourceType?: string;
+        sourceId?: string;
+        targetType?: string;
+        targetId?: string;
+        relationType?: string;
+        label?: string | null;
+      };
+      if (!body.sourceType || !body.sourceId || !body.targetType || !body.targetId) {
+        throw new Error('sourceType/sourceId/targetType/targetId son obligatorios.');
+      }
+      if (!RELATION_ENTITIES.has(body.sourceType) || !RELATION_ENTITIES.has(body.targetType)) {
+        throw new Error('Tipo de entidad no válido.');
+      }
+      return getSession().repos.relations.create({
+        projectId: requireProjectId(),
+        source: { type: body.sourceType as RelationEntityType, id: body.sourceId },
+        target: { type: body.targetType as RelationEntityType, id: body.targetId },
+        relationType: body.relationType,
+        label: body.label ?? null,
+      });
+    }),
+  );
+
+  app.delete(
+    '/api/relations/:id',
+    wrap((req) => getSession().repos.relations.remove(paramId(req))),
+  );
+
   app.get('/api/attributes', wrap(() => getSession().repos.attributes.listAttributes(requireProjectId())));
+
+  app.post(
+    '/api/attributes',
+    wrap((req) => {
+      const body = (req.body ?? {}) as { name?: string; dataType?: string };
+      const name = body.name?.trim();
+      if (!name) throw new Error('El nombre del atributo es obligatorio.');
+      const types: ReadonlySet<string> = new Set(['string', 'number', 'boolean', 'date']);
+      if (!body.dataType || !types.has(body.dataType)) throw new Error(`Tipo de atributo no válido: ${body.dataType}`);
+      return getSession().repos.attributes.createAttribute(requireProjectId(), {
+        name,
+        dataType: body.dataType as 'string' | 'number' | 'boolean' | 'date',
+      });
+    }),
+  );
+
+  app.post(
+    '/api/attributes/set-value',
+    wrap((req) => {
+      const body = (req.body ?? {}) as { documentId?: string; attributeId?: string; value?: string | null };
+      if (!body.documentId || !body.attributeId) throw new Error('documentId y attributeId son obligatorios.');
+      getSession().repos.attributes.setValue(body.documentId, body.attributeId, body.value ?? null);
+    }),
+  );
+
+  app.delete(
+    '/api/attributes/:id',
+    wrap((req) => getSession().repos.attributes.removeAttribute(paramId(req))),
+  );
+
+  app.get(
+    '/api/attributes/values',
+    wrap(() => {
+      const map = getSession().repos.attributes.valuesForProject(requireProjectId());
+      return Array.from(map.values()).flat();
+    }),
+  );
 
   app.get('/api/codes/families', wrap(() => getSession().repos.codes.listFamilies(requireProjectId())));
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Code, CodeTreeNode } from '@qualicanvas/core';
+import type { Code, CodeTreeNode, Relation } from '@qualicanvas/core';
 import { qwal } from '../api';
 import { useApp } from '../App';
 
@@ -200,20 +200,23 @@ export default function CodesView() {
           <p>Crea tu primer código para empezar a organizar tus categorías de análisis.</p>
         </div>
       ) : (
-        <div className="card">
-          <ul className="tree">
-            {tree.map((node) => (
-              <CodeNode
-                key={node.id}
-                node={node}
-                flat={flat ?? []}
-                onUpdate={handleUpdate}
-                onMove={handleMove}
-                onRemove={handleRemove}
-              />
-            ))}
-          </ul>
-        </div>
+        <>
+          <div className="card">
+            <ul className="tree">
+              {tree.map((node) => (
+                <CodeNode
+                  key={node.id}
+                  node={node}
+                  flat={flat ?? []}
+                  onUpdate={handleUpdate}
+                  onMove={handleMove}
+                  onRemove={handleRemove}
+                />
+              ))}
+            </ul>
+          </div>
+          <RelationsCard flat={flat ?? []} onChanged={refresh} />
+        </>
       )}
     </div>
   );
@@ -338,5 +341,132 @@ function CodeNode({ node, flat, onUpdate, onMove, onRemove }: CodeNodeProps) {
         </ul>
       )}
     </li>
+  );
+}
+
+/** Tipos de relación habituales en CAQDAS; `relationType` queda abierto a texto libre. */
+const RELATION_TYPES = ['asociado', 'es-un', 'parte-de', 'contradice', 'causa', 'similar'] as const;
+
+/** Relaciones tipadas entre códigos (semántica del investigador, no estadística). */
+function RelationsCard({ flat, onChanged }: { flat: Code[]; onChanged: () => Promise<void> | void }) {
+  const { notice } = useApp();
+  const [relations, setRelations] = useState<Relation[] | null>(null);
+  const [sourceId, setSourceId] = useState('');
+  const [relType, setRelType] = useState<string>(RELATION_TYPES[0]);
+  const [targetId, setTargetId] = useState('');
+  const [label, setLabel] = useState('');
+
+  const refresh = useCallback(async () => {
+    setRelations(await qwal.relations.list());
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const nameOf = (id: string) => flat.find((c) => c.id === id)?.name ?? id;
+
+  const handleCreate = async () => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    try {
+      await qwal.relations.create({
+        sourceType: 'code',
+        sourceId,
+        targetType: 'code',
+        targetId,
+        relationType: relType,
+        label: label.trim() || null,
+      });
+      setLabel('');
+      await refresh();
+      await onChanged();
+      notice('ok', `Relación creada: ${nameOf(sourceId)} —${relType}→ ${nameOf(targetId)}`);
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleRemove = async (id: string) => {
+    try {
+      await qwal.relations.remove(id);
+      await refresh();
+      await onChanged();
+    } catch (e) {
+      notice('error', e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <div className="card-title">
+        <h3>Relaciones entre códigos</h3>
+        <span className="chip">{relations?.length ?? 0}</span>
+      </div>
+      <div className="rel-form">
+        <select value={sourceId} onChange={(e) => setSourceId(e.target.value)} aria-label="Código origen">
+          <option value="">— origen —</option>
+          {flat.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <select value={relType} onChange={(e) => setRelType(e.target.value)} aria-label="Tipo de relación">
+          {RELATION_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+        <span aria-hidden="true">→</span>
+        <select value={targetId} onChange={(e) => setTargetId(e.target.value)} aria-label="Código destino">
+          <option value="">— destino —</option>
+          {flat.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <input
+          type="text"
+          className="attr-input"
+          placeholder="Etiqueta (opcional)"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void handleCreate();
+          }}
+        />
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={!sourceId || !targetId || sourceId === targetId}
+          onClick={() => void handleCreate()}
+        >
+          Crear relación
+        </button>
+      </div>
+      {relations !== null && relations.length > 0 && (
+        <ul className="rel-list">
+          {relations.map((r) => (
+            <li key={r.id} className="rel-item">
+              <span>
+                <b>{nameOf(r.source.id)}</b> —{r.relationType}→ <b>{nameOf(r.target.id)}</b>
+                {r.label ? <em className="rel-label"> ({r.label})</em> : null}
+              </span>
+              <button type="button" className="btn btn-sm btn-danger" onClick={() => void handleRemove(r.id)}>
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {relations !== null && relations.length === 0 && (
+        <p className="ws-hint">
+          Las relaciones (es-un, contradice, causa…) expresan tu interpretación y aparecen como flechas en la pestaña
+          «Red de códigos» del Análisis.
+        </p>
+      )}
+    </div>
   );
 }

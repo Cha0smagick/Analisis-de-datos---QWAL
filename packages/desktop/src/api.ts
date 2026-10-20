@@ -139,9 +139,9 @@ function query(params: Record<string, string | number | boolean | undefined>): s
 }
 
 export const db = {
-  open: (): Promise<DbOpenResult | null> =>
+  open: (filePath?: string): Promise<DbOpenResult | null> =>
     bridge
-      ? unwrap<DbOpenResult | null>(bridge.db.open())
+      ? unwrap<DbOpenResult | null>(bridge.db.open(filePath))
       : rpc<DbOpenResult | null>('/db/open'),
   create: (): Promise<DbOpenResult | null> =>
     bridge
@@ -200,6 +200,18 @@ export const documents = {
     bridge
       ? unwrap<boolean>(bridge.documents.remove(documentId))
       : rpc<boolean>(`/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' }),
+  createText: (input: { title: string; text: string; language?: string }): Promise<ImportResult> =>
+    bridge
+      ? unwrap<ImportResult>(bridge.documents.createText(input))
+      : rpc<ImportResult>('/documents/text', jsonBody(input)),
+};
+
+/** Transcripción local con Whisper (CLI externo); falla con mensaje claro si no está. */
+export const media = {
+  transcribe: (filePath: string): Promise<{ text: string }> =>
+    bridge
+      ? unwrap<{ text: string }>(bridge.media.transcribe(filePath))
+      : Promise.reject(new Error('La transcripción requiere la aplicación de escritorio.')),
 };
 
 export const codes = {
@@ -324,6 +336,25 @@ export const relations = {
     bridge
       ? unwrap<Relation[]>(bridge.relations.listForEntity(entityType, entityId))
       : rpc<Relation[]>(`/relations${query({ entityType, entityId })}`),
+  list: (): Promise<Relation[]> =>
+    bridge
+      ? unwrap<Relation[]>(bridge.relations.list())
+      : rpc<Relation[]>('/relations'),
+  create: (input: {
+    sourceType: RelationEntityType;
+    sourceId: string;
+    targetType: RelationEntityType;
+    targetId: string;
+    relationType?: string;
+    label?: string | null;
+  }): Promise<Relation> =>
+    bridge
+      ? unwrap<Relation>(bridge.relations.create(input))
+      : rpc<Relation>('/relations', jsonBody(input)),
+  remove: (relationId: string): Promise<boolean> =>
+    bridge
+      ? unwrap<boolean>(bridge.relations.remove(relationId))
+      : rpc<boolean>(`/relations/${encodeURIComponent(relationId)}`, { method: 'DELETE' }),
 };
 
 export const attributes = {
@@ -331,6 +362,22 @@ export const attributes = {
     bridge
       ? unwrap<Attribute[]>(bridge.attributes.list())
       : rpc<Attribute[]>('/attributes'),
+  create: (input: { name: string; dataType: 'string' | 'number' | 'boolean' | 'date' }): Promise<Attribute> =>
+    bridge
+      ? unwrap<Attribute>(bridge.attributes.create(input))
+      : rpc<Attribute>('/attributes', jsonBody(input)),
+  setValue: (documentId: string, attributeId: string, value: string | null): Promise<void> =>
+    bridge
+      ? unwrap<void>(bridge.attributes.setValue(documentId, attributeId, value))
+      : rpc<void>('/attributes/set-value', jsonBody({ documentId, attributeId, value })),
+  remove: (attributeId: string): Promise<boolean> =>
+    bridge
+      ? unwrap<boolean>(bridge.attributes.remove(attributeId))
+      : rpc<boolean>(`/attributes/${encodeURIComponent(attributeId)}`, { method: 'DELETE' }),
+  values: (): Promise<Array<{ documentId: string; attributeId: string; value: string | null }>> =>
+    bridge
+      ? unwrap<Array<{ documentId: string; attributeId: string; value: string | null }>>(bridge.attributes.values())
+      : rpc<Array<{ documentId: string; attributeId: string; value: string | null }>>('/attributes/values'),
 };
 
 export const search = {
@@ -395,5 +442,6 @@ export const qwal = {
   relations,
   attributes,
   search,
+  media,
   analysis,
 };

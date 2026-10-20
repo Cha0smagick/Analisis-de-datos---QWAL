@@ -127,7 +127,8 @@ export interface QuotationCodeAttribution {
 
 export interface ApiContract {
   db: {
-    open(): Promise<DbOpenResult | null>;
+    /** Con `filePath` abre esa base directamente; sin él, muestra el diálogo. */
+    open(filePath?: string): Promise<DbOpenResult | null>;
     create(): Promise<DbOpenResult | null>;
     /**
      * Vuelca a disco la base cuando está en memoria (backend `sqljs`). Con
@@ -147,6 +148,8 @@ export interface ApiContract {
     get(documentId: string): Promise<DocumentWithText | null>;
     updateRawText(documentId: string, text: string, language?: string): Promise<SourceDocument | undefined>;
     remove(documentId: string): Promise<boolean>;
+    /** Crea un documento de texto directamente (transcripciones, pegados). */
+    createText(input: { title: string; text: string; language?: string }): Promise<ImportResult>;
   };
   codes: {
     list(): Promise<Code[]>;
@@ -188,12 +191,32 @@ export interface ApiContract {
   };
   relations: {
     listForEntity(entityType: RelationEntityType, entityId: string): Promise<Relation[]>;
+    list(): Promise<Relation[]>;
+    create(input: {
+      sourceType: RelationEntityType;
+      sourceId: string;
+      targetType: RelationEntityType;
+      targetId: string;
+      relationType?: string;
+      label?: string | null;
+    }): Promise<Relation>;
+    remove(relationId: string): Promise<boolean>;
   };
   attributes: {
     list(): Promise<Attribute[]>;
+    create(input: { name: string; dataType: 'string' | 'number' | 'boolean' | 'date' }): Promise<Attribute>;
+    /** Upsert del valor de un atributo para un documento; `null` lo borra. */
+    setValue(documentId: string, attributeId: string, value: string | null): Promise<void>;
+    remove(attributeId: string): Promise<boolean>;
+    /** Valores planos de todos los documentos (cada uno con documentId/attributeId/value). */
+    values(): Promise<Array<{ documentId: string; attributeId: string; value: string | null }>>;
   };
   search: {
     query(query: string, options?: SearchOptions): Promise<SearchHit[]>;
+  };
+  /** Puente al CLI de Whisper: transcripción local de audio/vídeo, nada sale del equipo. */
+  media: {
+    transcribe(filePath: string): Promise<{ text: string }>;
   };
   /** Los diez métodos de análisis que el núcleo implementa, con sus informes reales. */
   analysis: {

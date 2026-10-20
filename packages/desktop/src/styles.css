@@ -809,7 +809,7 @@ table.data tr.selected {
   background-clip: padding-box;
 }
 
-/* ---------- Espacio de codificación (workspace) ---------- */
+/* ---------- Espacio de codificaciï¿½n (workspace) ---------- */
 
 .view-workspace {
   max-width: none;
@@ -1123,7 +1123,7 @@ table.data tr.selected {
   gap: 6px;
 }
 
-/* ---------- Análisis: KWIC, fiabilidad y matriz de marco ---------- */
+/* ---------- Anï¿½lisis: KWIC, fiabilidad y matriz de marco ---------- */
 
 .kwic-controls {
   display: flex;
@@ -1227,3 +1227,177 @@ table.data tr.selected {
   padding-left: 8px;
   margin-bottom: 6px;
 }
+
+/* ---------- Mapa de calor de co-ocurrencia ---------- */
+
+.heat-wrap {
+  max-height: 420px;
+  overflow: auto;
+}
+
+table.heat {
+  border-collapse: separate;
+  border-spacing: 2px;
+}
+
+table.heat th {
+  background: transparent;
+  border: none;
+  padding: 4px 6px;
+}
+
+table.heat thead th {
+  vertical-align: bottom;
+}
+
+/* Cabeceras de columna en vertical: caben 24 cÃ³digos sin aplastar la tabla. */
+.heat-head span {
+  display: inline-block;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  max-height: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.heat-row-head {
+  text-align: right;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.heat-cell {
+  min-width: 34px;
+  height: 26px;
+  text-align: center;
+  font-size: 11px;
+  border-radius: 3px;
+  color: var(--text);
+}
+
+/* ---------- Nube de palabras ---------- */
+
+.cloud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding: 14px 6px 18px;
+  line-height: 1.25;
+}
+
+.cloud-word {
+  cursor: default;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  transition: opacity 0.15s ease;
+}
+
+.cloud-word:hover {
+  opacity: 0.75;
+}
+
+.cloud-detail {
+  max-height: 320px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+/* ---------- Editor de atributos de casos ---------- */
+
+.attr-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0 14px;
+}
+
+.attr-form input[type='text'] {
+  flex: 1;
+  min-width: 200px;
+}
+
+.attr-input {
+  width: 100%;
+  min-width: 90px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 3px 6px;
+}
+
+.attr-input:hover {
+  border-color: var(--border);
+}
+
+.attr-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+}
+
+.attr-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.attr-remove {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.attr-remove:hover {
+  color: var(--danger);
+  background: rgba(255, 99, 99, 0.1);
+}
+
+/* ---------- Pulido global: foco y navegaciÃ³n por teclado ---------- */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+/* --- Red de códigos (grafo) --- */
+.net-svg { width: 100%; height: auto; background: var(--bg-elev, #fff); border: 1px solid var(--border, #ddd); border-radius: 10px; }
+.net-node { cursor: pointer; }
+.net-circle { fill: var(--accent, #4f8cff); stroke: #fff; stroke-width: 1.5; }
+.net-label { font-size: 11px; fill: var(--text, #222); paint-order: stroke; stroke: var(--bg-elev, #fff); stroke-width: 3px; stroke-linejoin: round; }
+.net-rel-label { font-size: 10px; fill: #d97a2b; paint-order: stroke; stroke: var(--bg-elev, #fff); stroke-width: 3px; stroke-linejoin: round; font-style: italic; }
+
+/* --- Reproductor multimedia en el workspace --- */
+.ws-media { display: flex; flex-direction: column; gap: 10px; height: 100%; }
+.ws-media-view { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.ws-media-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ws-media-img { max-width: 100%; max-height: 380px; border: 1px solid var(--border, #ddd); border-radius: 8px; align-self: center; }
+
+/* --- Relaciones entre códigos --- */
+.rel-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.rel-form select, .rel-form input { font-size: 13px; }
+.rel-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rel-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 10px; border: 1px solid var(--border, #ddd); border-radius: 8px; font-size: 13px; }
+.rel-label { color: var(--text-dim, #777); }
